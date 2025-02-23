@@ -5,33 +5,27 @@ import matplotlib.pyplot as plt
 def preprocess_image(image):
     # Convert to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    # Apply bilateral filter with optimized parameters for better noise reduction
-    blurred = cv2.bilateralFilter(gray, 11, 100, 100)
-    # Apply adaptive thresholding for better edge detection
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    # Apply adaptive thresholding
     thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-    # Apply Canny edge detection with optimized thresholds
-    edges = cv2.Canny(thresh, 50, 150)
-    # Dilate to connect edge components
+    # Perform morphological operations
     kernel = np.ones((3,3), np.uint8)
-    dilated = cv2.dilate(edges, kernel, iterations=2)
-    return dilated
+    morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    return morph
 
 def detect_edges(preprocessed_image):
-    # Find vertical lines
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
+    # Find vertical lines using morphological operations
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
     vertical = cv2.morphologyEx(preprocessed_image, cv2.MORPH_OPEN, vertical_kernel)
     
     # Find horizontal lines
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 1))
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
     horizontal = cv2.morphologyEx(preprocessed_image, cv2.MORPH_OPEN, horizontal_kernel)
     
     # Combine vertical and horizontal lines
     combined = cv2.bitwise_or(vertical, horizontal)
-    
-    # Clean up the combined edges
-    kernel = np.ones((3,3), np.uint8)
-    cleaned = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
-    return cleaned
+    return combined
 
 def find_panel_corners(image_path):
     # Read the image
@@ -48,72 +42,58 @@ def find_panel_corners(image_path):
     # Detect edges
     edges = detect_edges(preprocessed)
     
-    # Find contours with adjusted parameters
+    # Find contours
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Filter contours based on area and aspect ratio with adjusted thresholds
-    min_area = height * width * 0.02  # Minimum area as 2% of image
-    max_area = height * width * 0.5   # Maximum area as 50% of image
+    # Filter contours based on area and shape
+    min_area = height * width * 0.01
+    max_area = height * width * 0.5
     panel_contours = []
     
     for contour in contours:
         area = cv2.contourArea(contour)
         if min_area < area < max_area:
-            x, y, w, h = cv2.boundingRect(contour)
-            aspect_ratio = h/w
-            if 1.2 < aspect_ratio < 12:  # Even more flexible aspect ratio for curtain panels
-                # Use convex hull to get better shape
-                hull = cv2.convexHull(contour)
-                # Approximate the contour with more precise epsilon
-                epsilon = 0.02 * cv2.arcLength(hull, True)
-                approx = cv2.approxPolyDP(hull, epsilon, True)
-                if len(approx) >= 4:  # Only add if it has at least 4 corners
-                    panel_contours.append(approx)
+            # Get minimum area rectangle
+            rect = cv2.minAreaRect(contour)
+            box = cv2.boxPoints(rect)
+            box = np.int0(box)
+            
+            # Calculate aspect ratio
+            _, (w, h), _ = rect
+            aspect_ratio = max(w/h if h != 0 else 0, h/w if w != 0 else 0)
+            
+            if 2 < aspect_ratio < 8:  # Filter based on aspect ratio
+                panel_contours.append(box)
     
     # Sort panels from left to right
-    panel_contours.sort(key=lambda c: cv2.boundingRect(c)[0])
+    panel_contours.sort(key=lambda c: np.min(c[:, 0]))
     
     # Process each panel
     result = image.copy()
     all_corners = []
     
-    for idx, contour in enumerate(panel_contours):
-        # Get minimum area rectangle
-        rect = cv2.minAreaRect(contour)
-        box = cv2.boxPoints(rect)
-        box = np.int0(box)
+    for idx, box in enumerate(panel_contours):
+        # Sort points to get consistent order (top-left, top-right, bottom-right, bottom-left)
+        box = box[np.lexsort((box[:, 0], box[:, 1]))]
+        if box[0][0] > box[1][0]:
+            box[[0, 1]] = box[[1, 0]]
+        if box[2][0] < box[3][0]:
+            box[[2, 3]] = box[[3, 2]]
         
-        # Sort points to ensure consistent order
-        # Sort by y first to separate top and bottom points
-        box = box[box[:, 1].argsort()]
-        top = box[:2]
-        bottom = box[2:]
-        
-        # Sort top and bottom points by x
-        top = top[top[:, 0].argsort()]
-        bottom = bottom[bottom[:, 0].argsort()]
-        
-        # Combine points in order: top-left, top-right, bottom-right, bottom-left
-        box = np.vstack((top, bottom[::-1]))
-        
-        # Draw thick border around panel with gradient color
-        cv2.drawContours(result, [box], 0, (0, 0, 255), 5)
+        # Draw panel outline
+        cv2.drawContours(result, [box], 0, (0, 255, 0), 2)
         
         # Store corners
         corners = [(int(x), int(y)) for x, y in box]
         all_corners.append(corners)
         
-        # Draw corner points with enhanced visibility
+        # Draw corner points
         for corner in corners:
-            # Draw white background circle for better contrast
-            cv2.circle(result, corner, 12, (255, 255, 255), -1)
-            # Draw larger filled green circle
-            cv2.circle(result, corner, 10, (0, 255, 0), -1)
-            # Draw border for better visibility
-            cv2.circle(result, corner, 10, (0, 100, 0), 2)
+            cv2.circle(result, corner, 6, (0, 0, 255), -1)
+            cv2.circle(result, corner, 6, (0, 0, 0), 2)
         
         # Add panel number
-        x, y = corners[0]  # Use top-left corner for label
+        x, y = corners[0]
         cv2.putText(result, f'Panel {idx + 1}', (x, y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
     
